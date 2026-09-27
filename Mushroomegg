@@ -1,0 +1,456 @@
+--[========================================================--
+--  MushroomHub - Safe Tween Egg Sniper (Compact & Magical UI)
+--[========================================================--
+
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
+local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- ⚠️ 1. ใส่ Discord Webhook URL ของคุณตรงนี้
+local DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1553723214872453140/dHkbaMfJ71QuJc51EQ5txQ31-nS0HXjX7kUaI_O6bKfxa_pY8YHop5pljOM3_J9nYBe-"
+
+if _G.MobileQAFramework then
+    _G.MobileQAFramework:StopAll()
+end
+
+local Framework = {
+    Modules = {},
+    Connections = {},
+    IsRunning = false,
+    SelectedEggs = {},
+    IsLooping = false,
+    TweenSpeed = 1000,
+    EggLog = {
+        TotalPicked = 0,
+        Counts = {}
+    }
+}
+
+-- [ ฟังก์ชันระบบหลังบ้าน (Core Logic) ] --
+local function recordEgg(eggName)
+    if not Framework.EggLog.Counts[eggName] then Framework.EggLog.Counts[eggName] = 0 end
+    Framework.EggLog.Counts[eggName] = Framework.EggLog.Counts[eggName] + 1
+    Framework.EggLog.TotalPicked = Framework.EggLog.TotalPicked + 1
+end
+
+local function sendDiscordLog()
+    if DISCORD_WEBHOOK_URL == "" or DISCORD_WEBHOOK_URL == "วาง_WEBHOOK_URL_ตรงนี้" then return end
+    local requestFunc = (syn and syn.request) or (http and http.request) or http_request or request
+    if not requestFunc then return end
+
+    local eggDetailsText = ""
+    for eggName, count in pairs(Framework.EggLog.Counts) do
+        eggDetailsText = eggDetailsText .. "• **" .. eggName .. "**: " .. count .. " ฟอง\n"
+    end
+    if eggDetailsText == "" then eggDetailsText = "ยังไม่มีข้อมูลการเก็บไข่ในรอบนี้" end
+
+    local embed = {
+        title = "🍄 MushroomHub | รายงานการเก็บไข่",
+        color = 10181046, -- Purple/Pinkish
+        fields = {
+            { name = "👤 บัญชี", value = "`" .. LocalPlayer.Name .. "`", inline = true },
+            { name = "📊 เก็บได้รวม", value = "`" .. Framework.EggLog.TotalPicked .. " ฟอง`", inline = true },
+            { name = "📋 รายละเอียด", value = eggDetailsText, inline = false }
+        },
+        footer = { text = "MushroomHub Auto Sniper" },
+        timestamp = DateTime.now():ToIsoDate()
+    }
+    pcall(function()
+        requestFunc({ Url = DISCORD_WEBHOOK_URL, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode({ embeds = { embed } }) })
+    end)
+end
+
+function Framework:StartAll()
+    if self.IsRunning then return end
+    self.IsRunning = true
+end
+
+function Framework:StopAll()
+    self.IsRunning = false
+    self.IsLooping = false
+    if self.ScreenGui then self.ScreenGui:Destroy(); self.ScreenGui = nil end
+end
+
+local function safeTweenTo(targetCFrame)
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return false end
+    local rootPart = char.HumanoidRootPart
+    local distance = (rootPart.Position - targetCFrame.Position).Magnitude
+    if distance < 2 then return true end
+    local duration = distance / Framework.TweenSpeed
+    local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
+    local tween = TweenService:Create(rootPart, tweenInfo, {CFrame = targetCFrame})
+    tween:Play()
+    tween.Completed:Wait()
+    return true
+end
+
+local function findEggInRenderedEggs(targetName)
+    local renderedFolder = nil
+    for _, desc in ipairs(Workspace:GetDescendants()) do
+        if desc.Name == "RenderedEggs" and desc:IsA("Folder") then
+            renderedFolder = desc
+            break
+        end
+    end
+    if not renderedFolder then return nil, nil end
+    for _, obj in ipairs(renderedFolder:GetChildren()) do
+        if obj.Name == targetName then
+            local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart", true)
+            if part then return obj, part end
+        end
+    end
+    return nil, nil
+end
+
+local function getMyPlotPosition()
+    for _, desc in ipairs(Workspace:GetDescendants()) do
+        if desc.Name == "Plot" and desc:IsA("Model") then
+            local ownerLoaded = desc:GetAttribute("NestsOwnerLoaded")
+            if ownerLoaded and (tostring(ownerLoaded) == tostring(LocalPlayer.UserId) or tostring(ownerLoaded) == tostring(LocalPlayer.Name)) then
+                local part = desc:FindFirstChildWhichIsA("BasePart", true)
+                if part then return part.CFrame + Vector3.new(0, 5, 0) end
+            end
+            local dataFolder = desc:FindFirstChild("Data")
+            if dataFolder then
+                local ownerVal = dataFolder:FindFirstChild("Owner")
+                if ownerVal and (ownerVal.Value == LocalPlayer.Name or ownerVal.Value == LocalPlayer or tostring(ownerVal.Value) == tostring(LocalPlayer.UserId)) then
+                    local part = desc:FindFirstChildWhichIsA("BasePart", true)
+                    if part then return part.CFrame + Vector3.new(0, 5, 0) end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function triggerPickUp(eggInstance, eggPart)
+    pcall(function()
+        local char = LocalPlayer.Character
+        local rootPart = char and char:FindFirstChild("HumanoidRootPart")
+        local hasPrompt = false
+        for _, desc in ipairs(eggInstance:GetDescendants()) do
+            if desc:IsA("ProximityPrompt") then hasPrompt = true; fireproximityprompt(desc, 0)
+            elseif desc:IsA("ClickDetector") then hasPrompt = true; fireclickdetector(desc) end
+        end
+        if not hasPrompt and rootPart and eggPart then
+            firetouchinterest(rootPart, eggPart, 0); task.wait(0.05); firetouchinterest(rootPart, eggPart, 1)
+        end
+    end)
+end
+
+-- [ ระบบ UI หรูหรากะทัดรัด ] --
+local function addCorner(obj, radius)
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, radius or 6); c.Parent = obj
+end
+
+-- เอฟเฟกต์ดาววิ้งๆ
+local function createSparkleEffect(parentFrame)
+    task.spawn(function()
+        while task.wait(math.random(3, 8) / 10) do
+            if not parentFrame or not parentFrame.Parent then break end
+            local star = Instance.new("TextLabel")
+            star.Text = "✨"
+            star.BackgroundTransparency = 1
+            star.TextSize = math.random(10, 18)
+            star.Position = UDim2.new(math.random(5, 95)/100, 0, math.random(5, 95)/100, 0)
+            star.ZIndex = 0
+            star.Parent = parentFrame
+            
+            local tw1 = TweenService:Create(star, TweenInfo.new(1), {TextTransparency = 0.8, Position = star.Position - UDim2.new(0,0,0.05,0)})
+            tw1:Play()
+            tw1.Completed:Connect(function() star:Destroy() end)
+        end
+    end)
+end
+
+function Framework:BuildIndexUI()
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "MushroomHubUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    pcall(function() screenGui.Parent = CoreGui end)
+    if not screenGui.Parent then screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+    self.ScreenGui = screenGui
+
+    -- ปุ่มเปิด/ปิด แบบเห็ดน่ารัก
+    local toggleBtn = Instance.new("TextButton")
+    toggleBtn.Size = UDim2.new(0, 38, 0, 38)
+    toggleBtn.Position = UDim2.new(0, 10, 0.35, 0)
+    toggleBtn.BackgroundColor3 = Color3.fromRGB(30, 20, 40)
+    toggleBtn.Text = "🍄"
+    toggleBtn.TextSize = 20
+    toggleBtn.Draggable = true
+    addCorner(toggleBtn, 10)
+    
+    local toggleStroke = Instance.new("UIStroke")
+    toggleStroke.Color = Color3.fromRGB(150, 80, 200)
+    toggleStroke.Thickness = 1.5
+    toggleStroke.Parent = toggleBtn
+    toggleBtn.Parent = screenGui
+
+    -- Main Frame (เล็กลง สวยขึ้น)
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Size = UDim2.new(0, 250, 0, 380)
+    mainFrame.Position = UDim2.new(0.5, -125, 0.5, -190)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(20, 15, 25) -- สีม่วงเข้มๆ
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.Draggable = true
+    addCorner(mainFrame, 12)
+    
+    local mainStroke = Instance.new("UIStroke")
+    mainStroke.Color = Color3.fromRGB(120, 60, 180)
+    mainStroke.Thickness = 2
+    mainStroke.Parent = mainFrame
+    mainFrame.Parent = screenGui
+
+    createSparkleEffect(mainFrame) -- เรียกใช้เอฟเฟกต์ดาว
+
+    toggleBtn.MouseButton1Click:Connect(function() mainFrame.Visible = not mainFrame.Visible end)
+
+    -- Header
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 30)
+    title.BackgroundTransparency = 1
+    title.Text = "🍄 MushroomHub ✨"
+    title.TextColor3 = Color3.fromRGB(240, 150, 255)
+    title.TextSize, title.Font = 14, Enum.Font.GothamBold
+    title.Parent = mainFrame
+
+    -- ปุ่ม Scan
+    local refreshBtn = Instance.new("TextButton")
+    refreshBtn.Size = UDim2.new(0.9, 0, 0, 24)
+    refreshBtn.Position = UDim2.new(0.05, 0, 0.08, 0)
+    refreshBtn.BackgroundColor3 = Color3.fromRGB(90, 50, 160)
+    refreshBtn.Text = "🔍 Scan Eggs"
+    refreshBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    refreshBtn.TextSize, refreshBtn.Font = 11, Enum.Font.GothamBold
+    addCorner(refreshBtn, 6)
+    refreshBtn.Parent = mainFrame
+
+    -- Select/Clear
+    local selectAllBtn = Instance.new("TextButton")
+    selectAllBtn.Size = UDim2.new(0.43, 0, 0, 22)
+    selectAllBtn.Position = UDim2.new(0.05, 0, 0.16, 0)
+    selectAllBtn.BackgroundColor3 = Color3.fromRGB(40, 30, 50)
+    selectAllBtn.Text = "✓ All"
+    selectAllBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    selectAllBtn.TextSize, selectAllBtn.Font = 10, Enum.Font.GothamMedium
+    addCorner(selectAllBtn, 4)
+    selectAllBtn.Parent = mainFrame
+
+    local clearAllBtn = Instance.new("TextButton")
+    clearAllBtn.Size = UDim2.new(0.43, 0, 0, 22)
+    clearAllBtn.Position = UDim2.new(0.52, 0, 0.16, 0)
+    clearAllBtn.BackgroundColor3 = Color3.fromRGB(40, 30, 50)
+    clearAllBtn.Text = "✗ Clear"
+    clearAllBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    clearAllBtn.TextSize, clearAllBtn.Font = 10, Enum.Font.GothamMedium
+    addCorner(clearAllBtn, 4)
+    clearAllBtn.Parent = mainFrame
+
+    -- Status
+    local statusLbl = Instance.new("TextLabel")
+    statusLbl.Size = UDim2.new(0.9, 0, 0, 16)
+    statusLbl.Position = UDim2.new(0.05, 0, 0.23, 0)
+    statusLbl.BackgroundTransparency = 1
+    statusLbl.Text = "Selected: 0 | Picked: 0"
+    statusLbl.TextColor3 = Color3.fromRGB(255, 200, 255)
+    statusLbl.TextSize, statusLbl.Font = 10, Enum.Font.GothamMedium
+    statusLbl.Parent = mainFrame
+
+    -- Scroll Frame
+    local scrollContainer = Instance.new("ScrollingFrame")
+    scrollContainer.Size = UDim2.new(0.9, 0, 0.42, 0)
+    scrollContainer.Position = UDim2.new(0.05, 0, 0.28, 0)
+    scrollContainer.BackgroundColor3 = Color3.fromRGB(15, 10, 20)
+    scrollContainer.BorderSizePixel = 0
+    scrollContainer.ScrollBarThickness = 2
+    addCorner(scrollContainer, 6)
+    scrollContainer.Parent = mainFrame
+
+    local listLayout = Instance.new("UIListLayout")
+    listLayout.Padding = UDim.new(0, 3)
+    listLayout.Parent = scrollContainer
+
+    local function updateStatus()
+        local count = 0
+        for _, s in pairs(Framework.SelectedEggs) do if s then count = count + 1 end end
+        statusLbl.Text = "Selected: " .. count .. " | Picked: " .. Framework.EggLog.TotalPicked
+    end
+
+    local function scanEggs()
+        for _, child in ipairs(scrollContainer:GetChildren()) do
+            if child:IsA("TextButton") then child:Destroy() end
+        end
+
+        local eggNames = {}
+        for _, service in ipairs({ ReplicatedStorage, Workspace, Lighting }) do
+            pcall(function()
+                for _, desc in ipairs(service:GetDescendants()) do
+                    if (desc.Name == "Eggs" or desc.Name == "Egg") and (desc:IsA("Folder") or desc:IsA("Model")) then
+                        for _, egg in ipairs(desc:GetChildren()) do
+                            if egg.Name and egg.Name ~= "" then eggNames[egg.Name] = true end
+                        end
+                    end
+                end
+            end)
+        end
+
+        local sortedNames = {}
+        for name in pairs(eggNames) do table.insert(sortedNames, name) end
+        table.sort(sortedNames)
+
+        for _, name in ipairs(sortedNames) do
+            local eggBtn = Instance.new("TextButton")
+            eggBtn.Size = UDim2.new(1, 0, 0, 24)
+            local isSelected = Framework.SelectedEggs[name] or false
+            eggBtn.BackgroundColor3 = isSelected and Color3.fromRGB(120, 50, 150) or Color3.fromRGB(30, 20, 35)
+            eggBtn.Text = (isSelected and " ✨ " or " ◦ ") .. name
+            eggBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+            eggBtn.TextSize, eggBtn.Font = 10, Enum.Font.GothamMedium
+            addCorner(eggBtn, 4)
+            eggBtn.Parent = scrollContainer
+
+            eggBtn.MouseButton1Click:Connect(function()
+                Framework.SelectedEggs[name] = not Framework.SelectedEggs[name]
+                local active = Framework.SelectedEggs[name]
+                eggBtn.BackgroundColor3 = active and Color3.fromRGB(120, 50, 150) or Color3.fromRGB(30, 20, 35)
+                eggBtn.Text = (active and " ✨ " or " ◦ ") .. name
+                updateStatus()
+            end)
+        end
+        updateStatus()
+        scrollContainer.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y)
+    end
+
+    selectAllBtn.MouseButton1Click:Connect(function()
+        for _, btn in ipairs(scrollContainer:GetChildren()) do
+            if btn:IsA("TextButton") then
+                local eggName = btn.Text:sub(5)
+                Framework.SelectedEggs[eggName] = true
+                btn.BackgroundColor3 = Color3.fromRGB(120, 50, 150)
+                btn.Text = " ✨ " .. eggName
+            end
+        end
+        updateStatus()
+    end)
+
+    clearAllBtn.MouseButton1Click:Connect(function()
+        Framework.SelectedEggs = {}
+        for _, btn in ipairs(scrollContainer:GetChildren()) do
+            if btn:IsA("TextButton") then
+                local eggName = btn.Text:sub(5)
+                btn.BackgroundColor3 = Color3.fromRGB(30, 20, 35)
+                btn.Text = " ◦ " .. eggName
+            end
+        end
+        updateStatus()
+    end)
+
+    refreshBtn.MouseButton1Click:Connect(scanEggs)
+    task.spawn(scanEggs)
+
+    -- ปุ่ม Auto Loop (เริ่มฟาร์ม)
+    local toggleLoopBtn = Instance.new("TextButton")
+    toggleLoopBtn.Size = UDim2.new(0.9, 0, 0, 28)
+    toggleLoopBtn.Position = UDim2.new(0.05, 0, 0.73, 0)
+    toggleLoopBtn.BackgroundColor3 = Color3.fromRGB(40, 160, 100)
+    toggleLoopBtn.Text = "▶ Start Auto Farm"
+    toggleLoopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    toggleLoopBtn.TextSize, toggleLoopBtn.Font = 11, Enum.Font.GothamBold
+    addCorner(toggleLoopBtn, 6)
+    toggleLoopBtn.Parent = mainFrame
+
+    toggleLoopBtn.MouseButton1Click:Connect(function()
+        Framework.IsLooping = not Framework.IsLooping
+        if Framework.IsLooping then
+            toggleLoopBtn.BackgroundColor3 = Color3.fromRGB(200, 100, 50)
+            toggleLoopBtn.Text = "⏹ Stop Farming"
+        else
+            toggleLoopBtn.BackgroundColor3 = Color3.fromRGB(40, 160, 100)
+            toggleLoopBtn.Text = "▶ Start Auto Farm"
+        end
+    end)
+
+    -- ปุ่ม Discord
+    local sendLogBtn = Instance.new("TextButton")
+    sendLogBtn.Size = UDim2.new(0.9, 0, 0, 24)
+    sendLogBtn.Position = UDim2.new(0.05, 0, 0.82, 0)
+    sendLogBtn.BackgroundColor3 = Color3.fromRGB(88, 101, 242)
+    sendLogBtn.Text = "📩 Send Discord Log"
+    sendLogBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    sendLogBtn.TextSize, sendLogBtn.Font = 10, Enum.Font.GothamMedium
+    addCorner(sendLogBtn, 6)
+    sendLogBtn.Parent = mainFrame
+    sendLogBtn.MouseButton1Click:Connect(sendDiscordLog)
+
+    -- ปุ่ม Emergency Stop
+    local emergencyBtn = Instance.new("TextButton")
+    emergencyBtn.Size = UDim2.new(0.9, 0, 0, 22)
+    emergencyBtn.Position = UDim2.new(0.05, 0, 0.90, 0)
+    emergencyBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 60)
+    emergencyBtn.Text = "✖ Close Hub"
+    emergencyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    emergencyBtn.TextSize, emergencyBtn.Font = 10, Enum.Font.GothamMedium
+    addCorner(emergencyBtn, 6)
+    emergencyBtn.Parent = mainFrame
+    emergencyBtn.MouseButton1Click:Connect(function() self:StopAll() end)
+
+    -- ลูปฟาร์มไข่
+    task.spawn(function()
+        while true do
+            task.wait(0.5)
+            if Framework.IsLooping then
+                pcall(function()
+                    local activeList = {}
+                    for eggName, selected in pairs(Framework.SelectedEggs) do
+                        if selected then table.insert(activeList, eggName) end
+                    end
+                    table.sort(activeList)
+
+                    if #activeList == 0 then return end
+
+                    for _, eggName in ipairs(activeList) do
+                        if not Framework.IsLooping then break end
+
+                        local targetEggInstance, eggPart = findEggInRenderedEggs(eggName)
+                        if targetEggInstance and eggPart then
+                            local reached = safeTweenTo(eggPart.CFrame + Vector3.new(0, 3, 0))
+                            if reached and Framework.IsLooping then
+                                local startTime = tick()
+                                while tick() - startTime < 1.5 and Framework.IsLooping do
+                                    triggerPickUp(targetEggInstance, eggPart)
+                                    task.wait(0.2)
+                                end
+                                recordEgg(eggName)
+                                updateStatus()
+                                local plotPos = getMyPlotPosition()
+                                if plotPos then safeTweenTo(plotPos) end
+                                task.wait(0.3)
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+    end)
+
+    task.spawn(function()
+        while true do
+            task.wait(300)
+            if Framework.EggLog.TotalPicked > 0 then sendDiscordLog() end
+        end
+    end)
+end
+
+_G.MobileQAFramework = Framework
+Framework:BuildIndexUI()
+Framework:StartAll()
